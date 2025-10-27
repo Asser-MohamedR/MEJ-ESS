@@ -228,10 +228,50 @@ classdef MonteCarlo
         E_z
         
         
+          
+        % inlcude counters for Excitation and Ionization
+        %useful for calculation of Penning Transfer effect
+        cumulative_ion = 0;
+        cumulative_exc = 0;
+        penningRatio = 0;
+        r_p;
+        % Penning transfer parameters
+        quenching_ion_energy; % Ionization energy of quenching gas (e.g., CO2) in eV
+        penning_enabled; % Flag to enable/disable Penning effect (1/0)
+        
+        % Collision metadata for Penning effect
+        collision_gas_index; % Gas species index for each collision
+        collision_exc_level; % Excitation level index for excitation collisions
+        
     end
     
     methods
         
+        
+        
+        		function logCollisionData(obj, filename)
+				    fid = fopen(filename, 'a');
+				    fprintf(fid, 'Time: %s\n', datestr(now));
+				    fprintf(fid, 'Ar Excitation Thresholds:\n');
+				    for k = 1:length(obj.Xsec.excThresh{1})
+				        fprintf(fid, 'Level %d: %.2f eV\n', k, obj.Xsec.excThresh{1}{k});
+				    end
+				    fprintf(fid, 'Excitation Collisions (ind_exc):\n');
+				    for i = 1:length(obj.ind_exc)
+				        idx = obj.ind_exc(i);
+				        gas_idx = obj.collision_gas_index(idx);
+				        exc_level = obj.collision_exc_level(idx);
+				        if gas_idx == 1 && exc_level > 0 && exc_level <= length(obj.Xsec.excThresh{1})
+				            threshold = obj.Xsec.excThresh{1}{exc_level};
+				            penning_eligible = threshold > obj.quenching_ion_energy;
+				            fprintf(fid, 'Collision %d: Gas=%d, Exc_Level=%d, Threshold=%.2f eV, Penning_Eligible=%d\n', ...
+				                    idx, gas_idx, exc_level, threshold, penning_eligible);
+				        end
+				    end
+				    fprintf(fid, 'Cumulative Ionizations (Penning): %d\n', obj.cumulative_ion);
+				    fprintf(fid, 'Cumulative Excitations: %d\n', obj.cumulative_exc);
+				    fclose(fid);
+				end
         
         % =====================================================================
         %> @brief checks if sum of gas fractions is equal to 1
@@ -1083,6 +1123,23 @@ classdef MonteCarlo
                     end
                     %%
                     
+                    %% excitation rates:
+                    Sigma = obj.Xsec.exc ;
+                    obj.rates.conv.exc_tot = 0; % sum of ionization rates
+                    % species
+                    for j = 1 : length(Sigma)
+                        % collision types
+                        for k = 1 : length(Sigma{j})
+                            
+                            obj.rates.conv.exc{j}{k} = obj.mix(j)*convEEDFsigma(obj,Sigma{j}{k});
+                            obj.rates.conv.exc_tot = obj.rates.conv.exc_tot +  obj.rates.conv.exc{j}{k};
+                            obj.rates.conv.exc_coeff = obj.rates.conv.exc_tot * obj.N/(obj.flux.w(3));
+                            
+                            
+                        end
+                    end
+                    %%
+                                        
                     %% attachment rates:
                     Sigma = obj.Xsec.att;
                     obj.rates.conv.att_tot = 0; % sum of ionization rates
@@ -1129,6 +1186,11 @@ classdef MonteCarlo
             y = [y ; y(end)];
             x = [x ; 1e10 ];
             
+            [unique_x, ia] = unique(x, 'stable');  % 'stable' preserves order
+            unique_y = y(ia);
+            x = unique_x;
+            y = unique_y;
+            
             sigma_f = interp1(x,y,obj.E.energy,'linear', 'extrap');
             
             EEPF = obj.E.EEPF;
@@ -1146,130 +1208,130 @@ classdef MonteCarlo
         %> @brief decides which collision will happen for each electron
         %> Parameters: [ind_ela,ind_exc,ind_ion,ind_at,Mass,Loss]
         % =====================================================================
-        function obj = collisionMatrix(obj)
-            % decides which collision will happen for each electron
-            
-            [abs_v,E_in_eV] = obj.velocity2energy_in_ev(obj.v);
-            C = []; mass=[]; loss = [];
-            % elastic:
-            [C, N_ela, col_ela, mass, loss] = obj.collisionfreq(abs_v,E_in_eV,'obj.Xsec.ela',C,mass,loss);
-            % excitation:
-            [C, N_exc, col_exc, mass, loss] = obj.collisionfreq(abs_v,E_in_eV,'obj.Xsec.exc',C,mass,loss);
-            % ionization:
-            [C, N_ion, col_ion, mass, loss] = obj.collisionfreq(abs_v,E_in_eV,'obj.Xsec.ion',C,mass,loss);
-            % attachment:
-            [C, N_att, col_att, mass, loss] = obj.collisionfreq(abs_v,E_in_eV,'obj.Xsec.att',C,mass,loss);
-            
-            
-            %cumulative sum:
-            C = cumsum(C,2);
-            
-            %check if elements > 1:
-            if ~isempty(find(C > 1)) | ~isempty(find(isnan(C)))
-                fprintf('E_max might be too small! \n')
-                %obj.End = 1;
-            end
-            
-            % last column of C is random vector R:
-            N = size(obj.r{1},1);
-            R = obj.randomNumbers([N 1]);
-            R = repmat(R,1,size(C,2));
-            
-            % sort:
-            ind = sum(R>C,2) + 1;
-            
-            obj.Mass = zeros(N,1);
-            
-            for i = 1 : length(col_ela)
-                index = find(ind == col_ela(i));
-                obj.Mass(index) = mass(col_ela(i));
-            end
-            
-            obj.Loss = zeros(N,1);
-            
-            for i = 1 : length(col_exc)
-                index = find(ind == col_exc(i));
-                obj.Loss(index) = loss(col_exc(i));
-            end
-            
-            for i = 1 : length(col_ion)
-                index = find(ind == col_ion(i));
-                obj.Loss(index) = loss(col_ion(i));
-            end
-            
-            % indices that give electrons that perform certain collision:
-            obj.ind_ela = find(ind >= col_ela(1) & ind <= col_ela(end));
-            obj.ind_exc = find(ind >= col_exc(1) & ind <= col_exc(end));
-            obj.ind_ion = find(ind >= col_ion(1) & ind <= col_ion(end));
-            obj.ind_att = find(ind >= col_att(1) & ind <= col_att(end));
-            
-            % count all real collision that happend:
-            col = length(obj.ind_ela)+length(obj.ind_exc)+...
-                length(obj.ind_ion)+length(obj.ind_att);
-            obj.collisions = obj.collisions + col;
-            
-        end
-        
+		function obj = collisionMatrix(obj)
+		    % decides which collision will happen for each electron
+		    
+		    [abs_v, E_in_eV] = obj.velocity2energy_in_ev(obj.v);
+		    C = []; mass = []; loss = [];
+		    obj.collision_gas_index = zeros(size(obj.v, 1), 1);
+		    obj.collision_exc_level = zeros(size(obj.v, 1), 1);
+		    
+		    col_to_gas = [];
+		    col_to_exc_level = [];
+		    
+		    % elastic:
+		    [C, N_ela, col_ela, mass, loss, col_to_gas, col_to_exc_level] = ...
+		        obj.collisionfreq(abs_v, E_in_eV, 'obj.Xsec.ela', C, mass, loss, col_to_gas, col_to_exc_level);
+		    % excitation:
+		    [C, N_exc, col_exc, mass, loss, col_to_gas, col_to_exc_level] = ...
+		        obj.collisionfreq(abs_v, E_in_eV, 'obj.Xsec.exc', C, mass, loss, col_to_gas, col_to_exc_level);
+		    % ionization:
+		    [C, N_ion, col_ion, mass, loss, col_to_gas, col_to_exc_level] = ...
+		        obj.collisionfreq(abs_v, E_in_eV, 'obj.Xsec.ion', C, mass, loss, col_to_gas, col_to_exc_level);
+		    % attachment:
+		    [C, N_att, col_att, mass, loss, col_to_gas, col_to_exc_level] = ...
+		        obj.collisionfreq(abs_v, E_in_eV, 'obj.Xsec.att', C, mass, loss, col_to_gas, col_to_exc_level);
+		    
+		    % cumulative sum:
+		    C = cumsum(C, 2);
+		    
+		    % debug C values
+		    if ~isempty(find(C > 1, 1)) || ~isempty(find(isnan(C), 1))
+		        fprintf('E_max might be too small! Max C: %.2f, NaN count: %d\n', max(C(:)), sum(isnan(C(:))));
+		    end
+		    
+		    % last column of C is random vector R:
+		    N = size(obj.r{1}, 1);
+		    R = obj.randomNumbers([N 1]);
+		    R = repmat(R, 1, size(C, 2));
+		    
+		    % sort:
+		    ind = sum(R > C, 2) + 1;
+		    
+		    % assign gas index and excitation level
+		    obj.Mass = zeros(N, 1);
+		    obj.Loss = zeros(N, 1);
+		    for i = 1:N
+		        col_idx = ind(i);
+		        if col_idx <= length(col_to_gas)
+		            obj.collision_gas_index(i) = col_to_gas(col_idx);
+		            obj.collision_exc_level(i) = col_to_exc_level(col_idx);
+		            if col_idx >= col_ela(1) && col_idx <= col_ela(end)
+		                obj.Mass(i) = mass(col_idx);
+		            elseif col_idx >= col_exc(1) && col_idx <= col_exc(end)
+		                obj.Loss(i) = loss(col_idx);
+		            elseif col_idx >= col_ion(1) && col_idx <= col_ion(end)
+		                obj.Loss(i) = loss(col_idx);
+		            end
+		        end
+		    end
+		    
+		    % indices that give electrons that perform certain collision:
+		    obj.ind_ela = find(ind >= col_ela(1) & ind <= col_ela(end));
+		    obj.ind_exc = find(ind >= col_exc(1) & ind <= col_exc(end));
+		    obj.ind_ion = find(ind >= col_ion(1) & ind <= col_ion(end));
+		    obj.ind_att = find(ind >= col_att(1) & ind <= col_att(end));
+		    
+		    % debug collision counts
+		    %fprintf('Collision Counts: Elastic=%d, Excitation=%d, Ionization=%d, Attachment=%d\n', ...
+		     %       length(obj.ind_ela), length(obj.ind_exc), length(obj.ind_ion), length(obj.ind_att));
+		    
+		    % count all real collisions
+		    col = length(obj.ind_ela) + length(obj.ind_exc) + ...
+		          length(obj.ind_ion) + length(obj.ind_att);
+		    obj.collisions = obj.collisions + col;
+		    
+		    % increment cumulative excitation counter
+		    obj.cumulative_exc = obj.cumulative_exc + length(obj.ind_exc);
+		end
         % =====================================================================
         %> @brief calculates collision rates for columns of collision matrix
         % =====================================================================
-        function [C N col mass loss] = collisionfreq(obj,abs_v,E_in_eV,sigma,C,mass,loss)
-            % calculates collision rates for columns of collision matrix
-            
-            N = 0;
-            col = [];
-            % gas species
-            Sigma = eval(sigma);
-            for j = 1 : length(Sigma)
-                % collision types
-                for k = 1 : length(Sigma{j})
-                    N = N +1;
-                    x = Sigma{j}{k}(:,1);
-                    y = Sigma{j}{k}(:,2);
-                    
-    % Ensure x is unique by removing duplicates
-            [x, idx] = unique(x); % Keeps the original order
-            y = y(idx); % Update y to match the unique x values
-
-
-                    % add data point at the energy E_max
-                    if obj.E_max > x(end)
-                        x(end+1) = obj.E_max;
-                        y(end+1) = y(end);
-                    end
-                    
-                    sigma_f = interp1(x,y,E_in_eV,'linear', 'extrap');
-                    C(:,end+1) = obj.mix(j)*obj.N*sigma_f.*abs_v/obj.nu_max;
-                    col(end+1) = size(C,2);
-                    mass(end+1) = obj.mgas{j};
-                    
-                    % excitation
-                    if strcmp(sigma,'obj.Xsec.exc')
-                        loss(end+1) = obj.Xsec.excThresh{j}{k};
-                    end
-                    
-                    % ionization
-                    if strcmp(sigma,'obj.Xsec.ion')
-                        loss(end+1) = obj.Xsec.ionThresh{j}{k};
-                    end
-                    
-                    % ionization
-                    if strcmp(sigma,'obj.Xsec.att')
-                        loss(end+1) = 0;
-                    end
-                    
-                    % ionization
-                    if strcmp(sigma,'obj.Xsec.ela')
-                        loss(end+1) = 0;
-                    end
-                    
-                end
-            end
-            
-            
-            
-        end
-        
+		function [C, N, col, mass, loss, col_to_gas, col_to_exc_level] = ...
+		    collisionfreq(obj, abs_v, E_in_eV, sigma, C, mass, loss, col_to_gas, col_to_exc_level)
+		    % calculates collision rates for columns of collision matrix
+		    
+		    N = 0;
+		    col = [];
+		    Sigma = eval(sigma);
+		    for j = 1:length(Sigma)
+		        for k = 1:length(Sigma{j})
+		            N = N + 1;
+		            x = Sigma{j}{k}(:, 1);
+		            y = Sigma{j}{k}(:, 2);
+		            % Ensure x is unique
+		            [x, idx] = unique(x);
+		            y = y(idx);
+		            % Extend to E_max
+		            if obj.E_max > x(end)
+		                x(end+1) = obj.E_max;
+		                y(end+1) = y(end);
+		            end
+		            % Interpolate cross-section
+		            sigma_f = interp1(x, y, E_in_eV, 'linear', 'extrap');
+		            % Validate sigma_f
+		            if any(isnan(sigma_f)) || any(sigma_f < 0)
+		                fprintf('Warning: Invalid sigma_f for %s, Gas=%d, Level=%d, Max=%.2e\n', ...
+		                        sigma, j, k, max(sigma_f));
+		                sigma_f(isnan(sigma_f)) = 0;
+		                sigma_f(sigma_f < 0) = 0;
+		            end
+		            C(:, end+1) = obj.mix(j) * obj.N * sigma_f .* abs_v / obj.nu_max;
+		            col(end+1) = size(C, 2);
+		            mass(end+1) = obj.mgas{j};
+		            col_to_gas(end+1) = j;
+		            col_to_exc_level(end+1) = k;
+		            % Set loss
+		            if strcmp(sigma, 'obj.Xsec.exc')
+		                loss(end+1) = obj.Xsec.excThresh{j}{k};
+		            elseif strcmp(sigma, 'obj.Xsec.ion')
+		                loss(end+1) = obj.Xsec.ionThresh{j}{k};
+		            else
+		                loss(end+1) = 0;
+		            end
+		        end
+		    end
+		end
         % =====================================================================
         %> @brief performs elastic collision (isotropic or non-isotropic)
         %> Parameters: [v]
@@ -1339,68 +1401,121 @@ classdef MonteCarlo
         %> @brief performs inelastic collision (isotropic or non-isotropic)
         %> Parameters: [v]
         % =====================================================================
-        function obj = inelasticCollision(obj)
-            % performs inelastic collision (isotropic or non-isotropic)
-            
-            ind = obj.ind_exc;
-            
-            if  ~isempty(ind)
-                
-                v = obj.v(ind,:);
-                
-                [~,E_in_eV] = obj.velocity2energy_in_ev(v);
-                
-                % initial eularian angles
-                [theta_1,phi_1,abs_v] = cart2sph(v(:,1),v(:,2),v(:,3));
-                
-                % unit vector of incident velocity
-                [x_1,y_1,z_1] = sph2cart(theta_1,phi_1,1);
-                e1 = [x_1,y_1,z_1];
-                
-                % randomly chosen scattering angle:
-                
-                phi = 2*pi*obj.randomNumbers(size(ind));
-                sin_phi = sin(phi);
-                cos_phi =  sqrt(1 - sin_phi.^2);
-                
-                if obj.iso == 1
-                    cos_xsi = 1 - 2*obj.randomNumbers(size(ind));
-                    xsi = acos(cos_xsi);
-                else
-                    cos_xsi = ( 2 + E_in_eV - 2*(1+E_in_eV).^obj.randomNumbers(size(ind)) )./E_in_eV;
-                    %R = obj.randomNumbers(size(ind));
-                    %cos_xsi = 1 - 2*R - R.*(R-1).*E_in_eV;
-                    xsi = acos(cos_xsi);
-                end
-                
-                sin_xsi = sign(randn(size(cos_xsi))).*sqrt(1-cos_xsi.^2);
-                
-                % unit vector in x-direction
-                e_x  = zeros(size(e1));
-                e_x(:,1) = 1;
-                
-                cos_theta = sum(e1.*e_x,2);
-                sin_theta = sqrt(1 - cos_theta.^2);
-                
-                % equation (11) in Vahedi et al (1995):
-                e2 = repmat(cos_xsi,1,3).*e1 + ...
-                    repmat(sin_xsi.*sin_phi./sin_theta,1,3).*cross(e1,e_x) +...
-                    repmat(sin_xsi.*cos_phi./sin_theta,1,3).*cross( e1 , cross(e_x,e1) );
-                % normalize:
-                e2 = e2./repmat(sqrt(sum(e2.^2,2)),1,3);
-                
-                % energy after collision
-                [abs_v,E_in_eV] = obj.velocity2energy_in_ev(obj.v(ind,:));
-                E_in_eV = max( 0, E_in_eV - obj.Loss(ind) );
-                abs_v = sqrt(2*E_in_eV*obj.q0/obj.me);
-                obj.v(ind,:) = repmat(abs_v,1,3).*e2;
-                
-                
-            end
-            
-            
-        end
-        
+		function obj = inelasticCollision(obj)
+		    % performs inelastic collision (isotropic or non-isotropic) and handles Penning effect
+		    
+		    ind = obj.ind_exc;
+		    %fprintf('Number of excitation collisions (ind_exc): %d\n', length(ind));
+		    
+		    if ~isempty(ind)
+		        v = obj.v(ind, :);
+		        [~, E_in_eV] = obj.velocity2energy_in_ev(v);
+		        
+		        % initial eulerian angles
+		        [theta_1, phi_1, abs_v] = cart2sph(v(:, 1), v(:, 2), v(:, 3));
+		        
+		        % unit vector of incident velocity
+		        [x_1, y_1, z_1] = sph2cart(theta_1, phi_1, 1);
+		        e1 = [x_1, y_1, z_1];
+		        
+		        % randomly chosen scattering angle:
+		        phi = 2 * pi * obj.randomNumbers(size(ind));
+		        sin_phi = sin(phi);
+		        cos_phi = sqrt(1 - sin_phi.^2);
+		        
+		        if obj.iso == 1
+		            cos_xsi = 1 - 2 * obj.randomNumbers(size(ind));
+		            xsi = acos(cos_xsi);
+		        else
+		            cos_xsi = (2 + E_in_eV - 2 * (1 + E_in_eV).^obj.randomNumbers(size(ind))) ./ E_in_eV;
+		            xsi = acos(cos_xsi);
+		        end
+		        
+		        sin_xsi = sign(randn(size(cos_xsi))) .* sqrt(1 - cos_xsi.^2);
+		        
+		        % unit vector in x-direction
+		        e_x = zeros(size(e1));
+		        e_x(:, 1) = 1;
+		        
+		        cos_theta = sum(e1 .* e_x, 2);
+		        sin_theta = sqrt(1 - cos_theta.^2);
+		        
+		        % equation (11) in Vahedi et al (1995):
+		        e2 = repmat(cos_xsi, 1, 3) .* e1 + ...
+		             repmat(sin_xsi .* sin_phi ./ sin_theta, 1, 3) .* cross(e1, e_x) + ...
+		             repmat(sin_xsi .* cos_phi ./ sin_theta, 1, 3) .* cross(e1, cross(e_x, e1));
+		        % normalize:
+		        e2 = e2 ./ repmat(sqrt(sum(e2.^2, 2)), 1, 3);
+		        
+		        % energy after collision
+		        [abs_v, E_in_eV] = obj.velocity2energy_in_ev(obj.v(ind, :));
+		        E_in_eV = max(0, E_in_eV - obj.Loss(ind));
+		        abs_v = sqrt(2 * E_in_eV * obj.q0 / obj.me);
+		        obj.v(ind, :) = repmat(abs_v, 1, 3) .* e2;
+		        
+		        % Penning effect
+		        if obj.penning_enabled
+		            if isempty(obj.Xsec.excThresh{1})
+		                fprintf('Warning: Xsec.excThresh{1} is empty!\n');
+		            else
+		            %    fprintf('Ar Excitation Thresholds:\n');
+		                for k = 1:length(obj.Xsec.excThresh{1})
+		             %       fprintf('Level %d: %.2f eV\n', k, obj.Xsec.excThresh{1}{k});
+		                end
+		            end
+		           % fprintf('Excitation Collisions (ind_exc):\n');
+		            for i = 1:length(ind)
+		                idx = ind(i);
+		                gas_idx = obj.collision_gas_index(idx);
+		                exc_level = obj.collision_exc_level(idx);
+		                if gas_idx == 1 && exc_level > 0 && ~isempty(obj.Xsec.excThresh{1}) && ...
+		                   exc_level <= length(obj.Xsec.excThresh{1})
+		                    threshold = obj.Xsec.excThresh{1}{exc_level};
+		                %    fprintf('Collision %d: Gas=%d, Exc_Level=%d, Threshold=%.2f eV, Penning_Eligible=%d\n', ...
+		                 %           idx, gas_idx, exc_level, threshold, threshold > obj.quenching_ion_energy);
+		                else
+		                  %  fprintf('Collision %d: Gas=%d, Exc_Level=%d, excThresh{1} Empty=%d\n', ...
+		                   %         idx, gas_idx, exc_level, isempty(obj.Xsec.excThresh{1}));
+		                end
+		            end
+		            
+		            penning_ind = [];
+		            for i = 1:length(ind)
+		                idx = ind(i);
+		                gas_idx = obj.collision_gas_index(idx);
+		                exc_level = obj.collision_exc_level(idx);
+		                if gas_idx == 1 && exc_level > 0 && ~isempty(obj.Xsec.excThresh{1}) && ...
+		                   exc_level <= length(obj.Xsec.excThresh{1})
+		                    threshold = obj.Xsec.excThresh{1}{exc_level};
+		                    if threshold > obj.quenching_ion_energy
+		                        penning_ind = [penning_ind; idx];
+		                    end
+		                end
+		            end
+		            
+		            if ~isempty(penning_ind)
+		                penning_prob = obj.randomNumbers(size(penning_ind));
+		                penning_occurs = penning_prob < obj.r_p;
+		                penning_ind = penning_ind(penning_occurs);
+		                
+		                if ~isempty(penning_ind)
+		                    delta_Ne = length(penning_ind);
+		                    obj.v(end+1:end+delta_Ne, :) = zeros(delta_Ne, 3);
+		                    obj.r{1}(end+1:end+delta_Ne, :) = obj.r{1}(penning_ind, :);
+		                    obj.r{2}(end+1:end+delta_Ne, :) = obj.r{1}(penning_ind, :);
+		                    obj.mean.particles{1}(end) = obj.mean.particles{1}(end) + delta_Ne;
+		                    obj.mean.particles{2}(end) = obj.mean.particles{2}(end) + delta_Ne;
+		                    obj.cumulative_ion = obj.cumulative_ion + delta_Ne;
+		                    if obj.conserve == 1
+		                        i = randperm(size(obj.v, 1) - delta_Ne, delta_Ne);
+		                        obj.v(i, :) = [];
+		                        obj.r{1}(i, :) = [];
+		                    end
+		                end
+		            end
+		        end
+		    end
+		end
         % =====================================================================
         %> @brief performs ionization collision for electrons
         %> Parameters: [v,r,mean]
@@ -1912,7 +2027,7 @@ classdef MonteCarlo
             results.rates.count.att_coeff=obj.rates.count.att_coeff;
             results.rates.count.att_tot_err = obj.rates.count.att_tot_err;
             results.rates.conv.att_tot = obj.rates.conv.att_tot;
-            
+            results.rates.conv.exc_coeff = obj.rates.conv.exc_coeff;
             results.T_sst = obj.T_sst;
             results.elapsedTime = toc;
              results.rates.alpha = obj.rates.alpha;
@@ -1928,5 +2043,3 @@ classdef MonteCarlo
     end
     
 end
-
-
