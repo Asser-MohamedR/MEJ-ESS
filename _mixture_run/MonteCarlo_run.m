@@ -114,6 +114,9 @@ conserve = 1;
 % plot data (1) or not(0)
 interactive  =0;
 %%
+% Penning transfer parameters
+penning_enabled = 0; % Flag to enable/disable Penning effect (1/0)
+r_p = 0.42 ; %penning probability
 
 %% import cross sections
 %%
